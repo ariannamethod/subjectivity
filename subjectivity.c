@@ -378,9 +378,30 @@ static const Word CLOUD[] = {
  * use/decay, and alien words are INGESTED, taking the body's emotional state
  * at the instant they burned (AML SCAR: gravitational memory from rejected input). */
 #define MAXW 1024
-typedef struct { char w[24]; float weight; int syl; float aff[NCH]; unsigned char alien; } Live;
+enum { P_NOUN=0, P_VERB, P_ADJ };
+typedef struct { char w[24]; float weight; int syl; float aff[NCH]; unsigned char alien, pos; } Live;
 static Live g_live[MAXW];
 static int  g_nlive = 0;
+
+/* rough part-of-speech: everything is a NOUN unless on the small verb/adj lists.
+ * lets a little grammar arrange body-chosen words into readable image-fragments. */
+static const char *VERBS[] = {
+    "crave","yearn","adore","vanish","wither","decay","drown","swim","glide","sway",
+    "spin","whirl","ripple","pour","surge","slash","rip","smash","shatter","claw",
+    "sting","sear","bleed","snap","snarl","roar","gnash","thrash","wrench","gouge",
+    "batter","scorch","weep","mourn","cling","reach","remember","forget","hate","sink",
+    "rot","strike","bite","crack","crush","fade","hope","drift","fall","rise",
+    "break","burn","flow","glow","thaw","stream","stay","leave","hold","give",
+    "want","miss","wake","open","close","kiss","embrace","touch","cradle" };
+static const char *ADJS[] = {
+    "cold","dark","thin","small","alone","far","hollow","empty","barren","numb","tender","calm" };
+static int in_list(const char *w, const char **L, int n){
+    for(int i=0;i<n;i++) if(strcmp(w,L[i])==0) return 1; return 0; }
+static int pos_of(const char *w){
+    if(in_list(w, ADJS,  (int)(sizeof(ADJS)/sizeof(ADJS[0]))))   return P_ADJ;
+    if(in_list(w, VERBS, (int)(sizeof(VERBS)/sizeof(VERBS[0])))) return P_VERB;
+    return P_NOUN;
+}
 
 static void live_init(void){
     g_nlive = NCLOUD < MAXW ? NCLOUD : MAXW;
@@ -390,6 +411,7 @@ static void live_init(void){
         g_live[i].syl    = CLOUD[i].syl;
         for(int c=0;c<NCH;c++) g_live[i].aff[c] = CLOUD[i].aff[c];
         g_live[i].alien  = 0;
+        g_live[i].pos    = (unsigned char)pos_of(g_live[i].w);
     }
 }
 
@@ -557,28 +579,110 @@ static float resonance(const Body *b){
     float peak = b->ch[dom]-mean;
     return clampf(0.55f*b->ch[dom] + 0.9f*peak, 0.0f, 1.0f);
 }
-/* crude acoustic rhyme: shared last two letters, not the identical word */
-static int rhymes(const char *a, const char *b){
-    size_t la=strlen(a), lb=strlen(b);
-    if(la<2||lb<2||strcmp(a,b)==0) return 0;
-    return a[la-1]==b[lb-1] && a[la-2]==b[lb-2];
+/* rhyme by "rime": the tail from the last sounded vowel to the end (dropping a
+ * silent final e). Approximates English rhyme far better than raw last-letters —
+ * rejects love/give and embrace/voice, keeps heart/part and stone/bone. */
+static int is_vowel(char c){ return c=='a'||c=='e'||c=='i'||c=='o'||c=='u'||c=='y'; }
+static void rime_of(const char *w, char *buf){
+    int n=(int)strlen(w);
+    if(n>=2 && w[n-1]=='e' && !is_vowel(w[n-2])) n--;    /* drop a silent final e */
+    int v=0; for(int i=0;i<n;i++) if(is_vowel(w[i])) v=i;/* last sounded vowel */
+    int k=0; for(int i=v;i<n;i++) buf[k++]=w[i]; buf[k]='\0';
 }
-/* generate one line: pick words via the parliament until target_syll syllables
- * (0 = until resonance fades), appending indices to out[]. n_used carries across
- * lines so no word repeats within a breath. */
-static int gen_line(Body *b, int target_syll, int max_words, int out[]){
-    float logit[MAXW];
-    int n=0, syl=0;
-    for(int step=0; step<max_words; step++){
-        score_words(b, logit);
-        int w = parliament(b, logit, b->temp);
-        out[n++]=w;
-        if(b->n_used<64) b->used[b->n_used++]=w;
-        syl += g_live[w].syl;
-        if(target_syll>0 && syl>=target_syll) break;
-        if(target_syll==0 && step>=1){ float r=cosine(b->ch,g_live[w].aff,NCH); if(r<0.15f) break; }
+static int rhymes(const char *a, const char *b){
+    if(strcmp(a,b)==0) return 0;
+    char ra[24], rb[24]; rime_of(a,ra); rime_of(b,rb);
+    return (int)strlen(ra)>=2 && strcmp(ra,rb)==0;
+}
+/* ── glue: a little grammar so lines read as image-fragments, not word piles.
+ * structural ONLY — never enter the body/cloud, so they touch neither heat nor
+ * dissonance. content words stay body-chosen; glue just lets them form phrases. */
+static const char *GLUE_ART[]  = { "the","a","this","that","my","your" };
+static const char *GLUE_PREP[] = { "in","of","to","on","through","into","under","past",
+                                   "without","beneath","against","between","toward","like","as","from" };
+static const char *GLUE_CONJ[] = { "and","or","but","then","yet","still","so" };
+#define NART  ((int)(sizeof(GLUE_ART)/sizeof(GLUE_ART[0])))
+#define NPREP ((int)(sizeof(GLUE_PREP)/sizeof(GLUE_PREP[0])))
+#define NCONJ ((int)(sizeof(GLUE_CONJ)/sizeof(GLUE_CONJ[0])))
+static int pick_i(int n){ int i=(int)(randf()*n); return i>=n?n-1:i; }
+static void app(char *line, const char *w){ if(line[0]) strcat(line," "); strcat(line, w); }
+
+/* pick the best UNUSED word of a given part-of-speech for the current body */
+static int best_pos(Body *b, int pos){
+    float logit[MAXW]; score_words(b, logit);
+    int best=-1; float bv=-1e30f;
+    for(int w=0; w<g_nlive; w++){
+        if(g_live[w].pos!=pos) continue;
+        int skip=0; for(int u=0;u<b->n_used;u++) if(b->used[u]==w){ skip=1; break; }
+        if(skip) continue;
+        float v = logit[w] + (randf()-0.5f)*0.3f*b->temp;   /* heat-scaled jitter, not pure argmax */
+        if(v>bv){ bv=v; best=w; }
     }
-    return n;
+    if(best<0){                                             /* none of that pos free -> any word */
+        for(int w=0; w<g_nlive; w++){ int skip=0; for(int u=0;u<b->n_used;u++) if(b->used[u]==w){skip=1;break;}
+            if(skip) continue; if(logit[w]>bv){ bv=logit[w]; best=w; } }
+    }
+    return best;
+}
+/* 3rd-person verb form so "the heart drift" reads "the heart drifts" */
+static void verb_form(const char *v, char *out){
+    int n=(int)strlen(v);
+    strcpy(out, v);
+    char last=n?v[n-1]:0, prev=n>1?v[n-2]:0;
+    if(last=='s'||last=='z'||last=='x'||(last=='h'&&(prev=='s'||prev=='c'))) strcat(out,"es");
+    else if(last=='y'&&!is_vowel(prev)){ out[n-1]='\0'; strcat(out,"ies"); }
+    else strcat(out,"s");
+}
+/* the form a word is actually printed as (verb inflected, else the word itself) */
+static void emitted_form(int w, char *buf){
+    if(g_live[w].pos==P_VERB) verb_form(g_live[w].w, buf); else strcpy(buf, g_live[w].w);
+}
+/* emit one body-chosen word of a part-of-speech into the line (walks the body) */
+static void emit_word(Body *b, int pos, char *line, int cidx[], int *nc, int *syl){
+    int w = best_pos(b, pos); if(w<0) return;
+    if(g_live[w].pos==P_VERB){ char f[32]; verb_form(g_live[w].w, f); app(line, f); }
+    else app(line, g_live[w].w);
+    *syl += g_live[w].syl;
+    if(b->n_used<64) b->used[b->n_used++]=w;
+    cidx[(*nc)++]=w;
+    for(int c=0;c<NCH;c++) b->ch[c]=clampf(0.82f*b->ch[c]+0.18f*g_live[w].aff[c],0.0f,1.0f); /* walk */
+}
+static void emit_glue(char *line, const char **L, int n, int *syl){
+    const char *g=L[pick_i(n)]; app(line,g); *syl += syl_estimate(g);
+}
+
+/* build one line as a grammatical image-fragment: a frame arranges body-chosen
+ * words (adj/noun/verb) with a little glue, so it reads instead of piling up.
+ * content is still the body's choice; grammar only orders it. cidx -> morph. */
+static int gen_line(Body *b, int target_syll, char *line, int cidx[]){
+    int nc=0, syl=0; line[0]='\0';
+    int frame = pick_i(5);
+    if(randf()<0.28f) emit_glue(line, GLUE_ART, NART, &syl);       /* opening determiner (sparse) */
+    switch(frame){
+        case 0:  /* [det] adj noun                    "the cold stone" */
+            emit_word(b,P_ADJ,line,cidx,&nc,&syl);  emit_word(b,P_NOUN,line,cidx,&nc,&syl); break;
+        case 1:  /* [det] noun verb                   "the heart drifts" */
+            emit_word(b,P_NOUN,line,cidx,&nc,&syl); emit_word(b,P_VERB,line,cidx,&nc,&syl); break;
+        case 2:  /* [det] adj noun prep [det] noun    "cold stone in the void" */
+            emit_word(b,P_ADJ,line,cidx,&nc,&syl);  emit_word(b,P_NOUN,line,cidx,&nc,&syl);
+            emit_glue(line,GLUE_PREP,NPREP,&syl);   if(randf()<0.4f) emit_glue(line,GLUE_ART,NART,&syl);
+            emit_word(b,P_NOUN,line,cidx,&nc,&syl); break;
+        case 3:  /* noun verb prep [det] noun         "grief sinks into the dark" */
+            emit_word(b,P_NOUN,line,cidx,&nc,&syl); emit_word(b,P_VERB,line,cidx,&nc,&syl);
+            emit_glue(line,GLUE_PREP,NPREP,&syl);   if(randf()<0.4f) emit_glue(line,GLUE_ART,NART,&syl);
+            emit_word(b,P_NOUN,line,cidx,&nc,&syl); break;
+        default: /* adj noun conj adj noun            "cold stone and dark water" */
+            emit_word(b,P_ADJ,line,cidx,&nc,&syl);  emit_word(b,P_NOUN,line,cidx,&nc,&syl);
+            emit_glue(line,GLUE_CONJ,NCONJ,&syl);
+            emit_word(b,P_ADJ,line,cidx,&nc,&syl);  emit_word(b,P_NOUN,line,cidx,&nc,&syl); break;
+    }
+    /* pad toward the syllable budget with a trailing prep-image */
+    while(syl < target_syll-1 && nc < 7){
+        emit_glue(line,GLUE_PREP,NPREP,&syl);
+        if(randf()<0.5f) emit_glue(line,GLUE_ART,NART,&syl);
+        emit_word(b,P_NOUN,line,cidx,&nc,&syl);
+    }
+    return nc;
 }
 
 /* ── METARECURSION: hear your own draft, blend 15% back, keep the heat (klaus 8b) ── */
@@ -615,41 +719,41 @@ static void morph(const int *used, int n){
 static void render(Body *b){
     float res = resonance(b);
     int dom=0; for(int c=1;c<NCH;c++) if(b->ch[c]>b->ch[dom]) dom=c;
-    int allout[64]; int nall=0;
+    int allc[64]; int nall=0;
+    char line[256];
     b->n_used=0;
-    if(res < 0.34f){                                     /* scattered -> one hot line */
-        printf("\n  d=%.2f  T=%.2f  %s  res=%.2f  [line]\n  ", b->dissonance,b->temp,CH_NAME[dom],res);
-        int o[8]; int n=gen_line(b,0,4,o);
-        for(int i=0;i<n;i++){ printf("%s%s", i?" ":"", g_live[o[i]].w); allout[nall++]=o[i]; }
-        printf("\n\n");
+    if(res < 0.34f){                                     /* scattered -> one hot fragment */
+        int c[8]; int nc=gen_line(b, 4, line, c);
+        printf("\n  d=%.2f  T=%.2f  %s  res=%.2f  [line]\n  %s\n\n",
+               b->dissonance,b->temp,CH_NAME[dom],res,line);
+        for(int i=0;i<nc;i++) allc[nall++]=c[i];
     } else if(res < 0.66f){                              /* settling -> haiku 5-7-5 */
         printf("\n  d=%.2f  T=%.2f  %s  res=%.2f  [haiku]\n", b->dissonance,b->temp,CH_NAME[dom],res);
-        int budgets[3]={5,7,5};
-        for(int L=0;L<3;L++){
-            int o[8]; int n=gen_line(b,budgets[L],6,o);
-            printf("  "); for(int i=0;i<n;i++){ printf("%s%s", i?" ":"", g_live[o[i]].w); allout[nall++]=o[i]; }
-            printf("\n");
-        }
+        int bud[3]={5,7,5};
+        for(int L=0;L<3;L++){ int c[8]; int nc=gen_line(b,bud[L],line,c);
+            printf("  %s\n", line); for(int i=0;i<nc;i++) allc[nall++]=c[i]; }
         printf("\n");
     } else {                                             /* it truly resonates -> rhymed couplet */
         printf("\n  d=%.2f  T=%.2f  %s  res=%.2f  [couplet]\n", b->dissonance,b->temp,CH_NAME[dom],res);
-        int o1[8]; int n1=gen_line(b,0,5,o1);
-        const char *w1 = n1>0 ? g_live[o1[n1-1]].w : "";
-        printf("  "); for(int i=0;i<n1;i++){ printf("%s%s", i?" ":"", g_live[o1[i]].w); allout[nall++]=o1[i]; }
-        printf("\n");
-        int o2[8]; int n2=gen_line(b,0,4,o2);
-        printf("  "); for(int i=0;i<n2;i++){ printf("%s%s", i?" ":"", g_live[o2[i]].w); allout[nall++]=o2[i]; }
-        /* close line-2 on a rhyme with line-1 (Axis-2 bonus only, never heat) */
+        int c1[8]; int nc1=gen_line(b, 6, line, c1);
+        char w1[32]; if(nc1>0) emitted_form(c1[nc1-1], w1); else w1[0]='\0';
+        printf("  %s\n", line);
+        for(int i=0;i<nc1;i++) allc[nall++]=c1[i];
+        int c2[8]; int nc2=gen_line(b, 4, line, c2);
+        for(int i=0;i<nc2;i++) allc[nall++]=c2[i];
+        /* close line-2 on a real rhyme with line-1, matching the EMITTED forms
+         * (inflected verbs included) so the printed words actually rhyme */
         float logit[MAXW]; score_words(b, logit);
-        int closer=-1; float best=-1e30f;
+        int closer=-1; float best=-1e30f; char cbest[32];
         for(int w=0;w<g_nlive;w++){ int skip=0; for(int u=0;u<b->n_used;u++) if(b->used[u]==w){skip=1;break;}
-            if(skip || !rhymes(g_live[w].w, w1)) continue;
-            if(logit[w]>best){ best=logit[w]; closer=w; } }
-        if(closer>=0){ printf(" %s", g_live[closer].w); allout[nall++]=closer;
+            if(skip) continue; char cf[32]; emitted_form(w, cf);
+            if(!rhymes(cf, w1)) continue;
+            if(logit[w]>best){ best=logit[w]; closer=w; strcpy(cbest, cf); } }
+        if(closer>=0){ app(line, cbest); allc[nall++]=closer;
             if(b->n_used<64) b->used[b->n_used++]=closer; }
-        printf("\n\n");
+        printf("  %s\n\n", line);
     }
-    morph(allout, nall);   /* consolidate: used words gain weight, the rest decay */
+    morph(allc, nall);   /* consolidate: used words gain weight, the rest decay */
 }
 
 int main(int argc, char **argv){

@@ -145,3 +145,15 @@ Plan `~/.claude/plans/unified-stargazing-cherny.md` approved by Oleg; built A→
 **Codex audit (2026-07-06, `codex exec`, independent tool):** `Findings: none`. Alien ingestion, `/top` sort, `gen_line`/`render` bounds, uninitialized/OOB — all clean; frozen-heat invariant confirmed at subjectivity.c:599-600. No files modified.
 
 **PENDING:** Fable/Mythos audit (Oleg's trigger; Mythos unstable — its classifier flags C+memcpy). No push without «да». Deferred v0.3+: overthinkg rings, dream/colony, phase4, Markov, MLP/RAE, SentencePiece.
+
+## 11. v0.2.2 — readability fix (2026-07-18): grammar so it reads as haiku, not word-piles
+
+Oleg (rightly): v0.2 lines were themed word-piles and the rhymes were fake — "хайку это мог, ты это разрушил". Root cause: I removed sequential structure and excluded ALL function/glue words, so lines couldn't form phrases; the rhyme checked last-2-chars (consonance, not rhyme → love/give, embrace/voice false). Fixed (content stays body-chosen; grammar only orders it):
+- **Part-of-speech + frame grammar** — each word tagged noun/verb/adj (`pos_of`, small VERBS/ADJS lists, rest noun); `gen_line` builds a line from 1 of 5 image-fragment frames ("[det] adj noun", "noun verb prep [det] noun", "adj noun conj adj noun"), the body choosing the best word for each slot (`best_pos`). Glue = small structural-only tables (art/prep/conj), never in the cloud → don't touch heat/dissonance.
+- **Verb inflection** (`verb_form`): 3rd-person -s/-es/-ies → "the heart drifts", "sorrow mourns".
+- **Real rhyme** (`rhymes`/`rime_of`): the rime = tail from the last sounded vowel (dropping silent final e), compared on the EMITTED form (inflected verbs). Rejects love/give, embrace/voice; accepts scar/tar, midnight/night, lip/rip.
+- **Associative walk**: body nudges 18% toward each word said, so a line moves through feeling.
+
+Tool-verified: `-Wall` clean; reads ("a sob weeps of sorrow / small widow between the grief / orphan forgets into nightfall"; "thin flint to a scar / your dark thorn tar"); real rhymes present; frozen heat intact (alien T=1.61); determinism md5 stable. **Codex audit:** memory-safety clean; found 1 low bug (rhyme used base verb form, not emitted) → fixed same turn (emitted-form compare).
+
+**Known remainder:** real rhymes are sparser than the fakes were, so a couplet rhymes only when line-1's ending has a real mate (else a short line-2). NEXT candidate: guarantee every couplet rhymes (force line-1 to end on a word that has a rhyme-mate).
