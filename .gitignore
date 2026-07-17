@@ -1,0 +1,6 @@
+# reference clones (upstream python-haiku, old dario haiku.c, q, postgpt) — local only
+reffs/
+# build artifacts
+subjectivity
+*.o
+*.dSYM
