@@ -383,6 +383,14 @@ typedef struct { char w[24]; float weight; int syl; float aff[NCH]; unsigned cha
 static Live g_live[MAXW];
 static int  g_nlive = 0;
 
+/* ── SHAME: the interior weight of voicing what wounded you (an alien scar-word
+ * spoken = the return of the repressed). Accrues large via log1p, hidden inside,
+ * inferable only through the withering of the voice. SUBJ_NOSHAME disables it. */
+static float g_shame = 0.0f;
+static int   g_shame_off = 0;   /* SUBJ_NOSHAME: shame persists but has no effect this run */
+#define SHAME_GAIN  0.35f
+#define SHAME_DECAY 0.997f
+
 /* rough part-of-speech: everything is a NOUN unless on the small verb/adj lists.
  * lets a little grammar arrange body-chosen words into readable image-fragments. */
 static const char *VERBS[] = {
@@ -514,6 +522,11 @@ static void score_words(const Body *b, float *logit){
         float pull = g_live[w].weight * inertia * 0.3f;   /* live mass (morphs with use), quieted when loud */
         logit[w] = soma + pull;
         for(int u=0;u<b->n_used;u++) if(b->used[u]==w){ logit[w]-=100.0f; break; }
+    }
+    if(g_shame>1e-6f && !g_shame_off){   /* AML PAIN: shame compresses the voice toward its mean — it loses its shape */
+        float pain=tanhf(g_shame), m=0;
+        for(int w=0;w<g_nlive;w++) m+=logit[w]; m/=(float)g_nlive;
+        for(int w=0;w<g_nlive;w++) logit[w]=m+(logit[w]-m)*(1.0f-0.5f*pain);
     }
 }
 
@@ -717,7 +730,7 @@ static void morph(const int *used, int n){
  * scattered, a haiku when settling, a rhymed couplet when it truly resonates.
  * Form lives here (Axis-2 chooser), never touches temperature. ── */
 static void render(Body *b){
-    float res = resonance(b);
+    float res = resonance(b) * (1.0f - 0.4f*tanhf(g_shame_off?0.0f:g_shame));   /* shame withers the form toward the terse */
     int dom=0; for(int c=1;c<NCH;c++) if(b->ch[c]>b->ch[dom]) dom=c;
     int allc[64]; int nall=0;
     char line[256];
@@ -754,6 +767,11 @@ static void render(Body *b){
         printf("  %s\n\n", line);
     }
     morph(allc, nall);   /* consolidate: used words gain weight, the rest decay */
+    if(!g_shame_off){   /* voicing an alien scar-word = the return of the repressed */
+        int na=0; for(int i=0;i<nall;i++) if(g_live[allc[i]].alien) na++;
+        if(na>0) g_shame += SHAME_GAIN*log1pf((float)na)/(1.0f+g_shame);
+        g_shame *= SHAME_DECAY;   /* a wound that fades but never fully closes */
+    }
 }
 
 /* ── PERSISTENCE: the scar outlives the session — a memory across lives ──
@@ -763,7 +781,7 @@ static void render(Body *b){
  * both (fresh + deterministic). */
 #define MEM_PATH  "subjectivity.mem"
 #define MEM_MAGIC 0x5355424Au    /* 'S''U''B''J' */
-#define MEM_VER   1
+#define MEM_VER   2               /* v2 adds g_shame after the count */
 
 static void save_scar(void){
     if(getenv("SUBJ_NOMEM")) return;
@@ -772,6 +790,7 @@ static void save_scar(void){
     ok &= (fwrite(&magic,sizeof magic,1,f)==1);
     ok &= (fwrite(&ver,sizeof ver,1,f)==1);
     ok &= (fwrite(&g_nlive,sizeof g_nlive,1,f)==1);
+    ok &= (fwrite(&g_shame,sizeof g_shame,1,f)==1);
     ok &= (fwrite(g_live,sizeof(Live),(size_t)g_nlive,f)==(size_t)g_nlive);
     if(fclose(f)!=0) ok=0;
     if(!ok || rename(MEM_PATH ".tmp", MEM_PATH)!=0) remove(MEM_PATH ".tmp");
@@ -786,6 +805,9 @@ static int load_scar(int *regrown_out){
     if(fread(&magic,sizeof magic,1,f)!=1 || magic!=MEM_MAGIC ||
        fread(&ver,sizeof ver,1,f)!=1 || ver!=MEM_VER ||
        fread(&n,sizeof n,1,f)!=1 || n<0 || n>MAXW){ fclose(f); return 0; }
+    float sh=0.0f;
+    if(fread(&sh,sizeof sh,1,f)!=1){ fclose(f); return 0; }
+    if(isfinite(sh) && sh>=0.0f && sh<=20.0f) g_shame=sh;   /* always restore; SUBJ_NOSHAME only mutes effect */
     int restored=0, regrown=0;
     for(int i=0;i<n;i++){
         Live rec;
@@ -810,6 +832,7 @@ static int load_scar(int *regrown_out){
 int main(int argc, char **argv){
     unsigned long seed = argc>1 ? strtoull(argv[1],NULL,10) : 42UL;
     seed_rng(seed);
+    g_shame_off = getenv("SUBJ_NOSHAME") != NULL;
     live_init();                            /* grow the mutable body from the seed */
     int regrown=0, remembered=load_scar(&regrown);   /* wake with the memory of past lives */
     Body b; memset(&b,0,sizeof(b));
@@ -834,7 +857,7 @@ int main(int argc, char **argv){
                 if(x>wv[7]){ wv[7]=x; idx[7]=w;
                     for(int i=6;i>=0;i--) if(wv[i+1]>wv[i]){ float tv=wv[i];wv[i]=wv[i+1];wv[i+1]=tv;
                         int ti=idx[i];idx[i]=idx[i+1];idx[i+1]=ti; } } }
-            printf("\n  cloud=%d  top:", g_nlive);
+            printf("\n  cloud=%d  shame=%.2f  top:", g_nlive, g_shame);
             for(int i=0;i<8 && idx[i]>=0;i++)
                 printf(" %s%s(%.2f)", g_live[idx[i]].w, g_live[idx[i]].alien?"*":"", wv[i]);
             printf("\n\n");
