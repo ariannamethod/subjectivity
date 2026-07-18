@@ -22,6 +22,9 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <sys/file.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* ── 6 emotional chambers (the body) ─────────────────────────────── */
 enum { CH_FEAR=0, CH_LOVE, CH_RAGE, CH_VOID, CH_FLOW, CH_COMPLEX, NCH };
@@ -390,6 +393,16 @@ static float g_shame = 0.0f;
 static int   g_shame_off = 0;   /* SUBJ_NOSHAME: shame persists but has no effect this run */
 #define SHAME_GAIN  0.35f
 #define SHAME_DECAY 0.997f
+
+/* ── the carrier: two organisms deform one shared medium with their scars.
+ * D = the standing scar-deformation — the mean chamber-shape of the ingested
+ * alien words (weighted) + the shame; the other's D bends this body toward it
+ * (a Kuramoto pull). Behind SUBJ_CARRIER / SUBJ_ID; unset = gate-invariant. */
+static const char *g_carrier_path = NULL;
+static int   g_carrier_slot = 0;              /* 0 = A, 1 = B */
+static float g_carrier_other[NCH+1];          /* the other's last-read D (for /top) */
+static int   g_carrier_seen = 0;
+#define CARRIER_K 0.30f
 
 /* rough part-of-speech: everything is a NOUN unless on the small verb/adj lists.
  * lets a little grammar arrange body-chosen words into readable image-fragments. */
@@ -829,10 +842,49 @@ static int load_scar(int *regrown_out){
     return restored+regrown;
 }
 
+/* this organism's standing scar-deformation: the weighted mean chamber-shape of
+ * its ingested alien words, plus its shame in the last slot */
+static void compute_D(float D[NCH+1]){
+    for(int c=0;c<=NCH;c++) D[c]=0.0f;
+    float tot=0.0f;
+    for(int i=0;i<g_nlive;i++) if(g_live[i].alien){
+        for(int c=0;c<NCH;c++) D[c]+=g_live[i].aff[c]*g_live[i].weight;
+        tot+=g_live[i].weight;
+    }
+    if(tot>1e-6f) for(int c=0;c<NCH;c++) D[c]/=tot;
+    D[NCH]=g_shame;
+}
+
+/* write my D to my slot, read the other's, let the other's scar bend my body.
+ * O_CREAT (never O_TRUNC) + flock'd pread/pwrite so two processes never tear or
+ * truncate a slot; a peer with no scar (D≈0) exerts no pull. */
+static void carrier_bend(Body *b){
+    if(!g_carrier_path) return;
+    float Dself[NCH+1]; compute_D(Dself);
+    int fd=open(g_carrier_path, O_RDWR|O_CREAT, 0644); if(fd<0) return;
+    if(flock(fd, LOCK_EX)!=0){ close(fd); return; }
+    float buf[2][NCH+1]; memset(buf,0,sizeof buf);
+    ssize_t r=pread(fd, buf, sizeof buf, 0);
+    if(r < (ssize_t)sizeof buf) memset(buf,0,sizeof buf);   /* fresh/partial/error read → peer absent, don't trust bytes */
+    memcpy(buf[g_carrier_slot], Dself, sizeof Dself);
+    ssize_t w=pwrite(fd, buf, sizeof buf, 0);
+    flock(fd, LOCK_UN); close(fd);
+    if(w!=(ssize_t)sizeof buf) return;                 /* write failed: don't claim an exchange */
+    float Dother[NCH+1]; memcpy(Dother, buf[1-g_carrier_slot], sizeof Dother);
+    float onorm=0.0f;
+    for(int c=0;c<NCH;c++){ if(!isfinite(Dother[c])) Dother[c]=0.0f; Dother[c]=clampf(Dother[c],0.0f,1.0f); onorm+=Dother[c]*Dother[c]; }
+    if(!isfinite(Dother[NCH])) Dother[NCH]=0.0f; Dother[NCH]=clampf(Dother[NCH],0.0f,20.0f);
+    if(onorm<1e-6f && Dother[NCH]<1e-6f){ g_carrier_seen=0; return; }   /* peer scarless/gone → no pull, clear stale */
+    for(int c=0;c<NCH;c++) b->ch[c]=clampf(b->ch[c]+CARRIER_K*(Dother[c]-b->ch[c]),0.0f,1.0f);
+    memcpy(g_carrier_other, Dother, sizeof Dother); g_carrier_seen=1;
+}
+
 int main(int argc, char **argv){
     unsigned long seed = argc>1 ? strtoull(argv[1],NULL,10) : 42UL;
     seed_rng(seed);
     g_shame_off = getenv("SUBJ_NOSHAME") != NULL;
+    g_carrier_path = getenv("SUBJ_CARRIER");
+    { const char *id=getenv("SUBJ_ID"); g_carrier_slot = (id && (id[0]=='B'||id[0]=='b')) ? 1 : 0; }
     live_init();                            /* grow the mutable body from the seed */
     int regrown=0, remembered=load_scar(&regrown);   /* wake with the memory of past lives */
     Body b; memset(&b,0,sizeof(b));
@@ -860,12 +912,16 @@ int main(int argc, char **argv){
             printf("\n  cloud=%d  shame=%.2f  top:", g_nlive, g_shame);
             for(int i=0;i<8 && idx[i]>=0;i++)
                 printf(" %s%s(%.2f)", g_live[idx[i]].w, g_live[idx[i]].alien?"*":"", wv[i]);
-            printf("\n\n");
+            printf("\n");
+            if(g_carrier_seen){ int od=0; for(int c=1;c<NCH;c++) if(g_carrier_other[c]>g_carrier_other[od]) od=c;
+                printf("  carrier[%c] other: dom=%s shame=%.2f\n", g_carrier_slot?'B':'A', CH_NAME[od], g_carrier_other[NCH]); }
+            printf("\n");
             continue;
         }
         if(L==0) continue;
 
         inhale(&b, line);
+        carrier_bend(&b);   /* the other's standing scar bends this body toward it */
         settle(&b);      /* metarecursion: hear a draft, blend 15%, keep the heat */
         render(&b);      /* dynamic form by resonance; consolidates (morph) inside */
     }
