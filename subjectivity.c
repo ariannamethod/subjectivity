@@ -591,7 +591,7 @@ static void rime_of(const char *w, char *buf){
 }
 static int rhymes(const char *a, const char *b){
     if(strcmp(a,b)==0) return 0;
-    char ra[24], rb[24]; rime_of(a,ra); rime_of(b,rb);
+    char ra[32], rb[32]; rime_of(a,ra); rime_of(b,rb);   /* hold any emitted form + NUL */
     return (int)strlen(ra)>=2 && strcmp(ra,rb)==0;
 }
 /* ── glue: a little grammar so lines read as image-fragments, not word piles.
@@ -756,10 +756,62 @@ static void render(Body *b){
     morph(allc, nall);   /* consolidate: used words gain weight, the rest decay */
 }
 
+/* ── PERSISTENCE: the scar outlives the session — a memory across lives ──
+ * Dump the whole live cloud; on load, MERGE onto the fresh seed by word (not a
+ * raw replace), so editing the seed never corrupts a past life: a seed word's
+ * morphed weight is restored, an ingested word is re-grown. SUBJ_NOMEM disables
+ * both (fresh + deterministic). */
+#define MEM_PATH  "subjectivity.mem"
+#define MEM_MAGIC 0x5355424Au    /* 'S''U''B''J' */
+#define MEM_VER   1
+
+static void save_scar(void){
+    if(getenv("SUBJ_NOMEM")) return;
+    FILE *f=fopen(MEM_PATH ".tmp","wb"); if(!f) return;   /* write temp, rename = atomic */
+    uint32_t magic=MEM_MAGIC; int ver=MEM_VER; int ok=1;
+    ok &= (fwrite(&magic,sizeof magic,1,f)==1);
+    ok &= (fwrite(&ver,sizeof ver,1,f)==1);
+    ok &= (fwrite(&g_nlive,sizeof g_nlive,1,f)==1);
+    ok &= (fwrite(g_live,sizeof(Live),(size_t)g_nlive,f)==(size_t)g_nlive);
+    if(fclose(f)!=0) ok=0;
+    if(!ok || rename(MEM_PATH ".tmp", MEM_PATH)!=0) remove(MEM_PATH ".tmp");
+}
+
+/* returns total remembered (restored weights + regrown scars); *regrown_out = scars */
+static int load_scar(int *regrown_out){
+    *regrown_out=0;
+    if(getenv("SUBJ_NOMEM")) return 0;
+    FILE *f=fopen(MEM_PATH,"rb"); if(!f) return 0;
+    uint32_t magic=0; int ver=0, n=0;
+    if(fread(&magic,sizeof magic,1,f)!=1 || magic!=MEM_MAGIC ||
+       fread(&ver,sizeof ver,1,f)!=1 || ver!=MEM_VER ||
+       fread(&n,sizeof n,1,f)!=1 || n<0 || n>MAXW){ fclose(f); return 0; }
+    int restored=0, regrown=0;
+    for(int i=0;i<n;i++){
+        Live rec;
+        if(fread(&rec,sizeof rec,1,f)!=1) break;               /* torn file: keep what we have */
+        rec.w[23]='\0';                                         /* sanitize a crafted record: */
+        if(!isfinite(rec.weight)) rec.weight=1.0f;
+        rec.weight=clampf(rec.weight,0.05f,3.0f);
+        for(int c=0;c<NCH;c++){ if(!isfinite(rec.aff[c])) rec.aff[c]=0.0f;
+            rec.aff[c]=clampf(rec.aff[c],0.0f,1.0f); }
+        if(rec.syl<1||rec.syl>12) rec.syl=1;
+        rec.alien = rec.alien?1:0;
+        if(rec.pos>P_ADJ) rec.pos=P_NOUN;
+        int id=cloud_find(rec.w);
+        if(id>=0){ g_live[id].weight=rec.weight; restored++; }        /* seed: restore weight */
+        else if(g_nlive<MAXW){ g_live[g_nlive++]=rec; regrown++; }    /* ingested: re-grow */
+    }
+    fclose(f);
+    *regrown_out=regrown;
+    return restored+regrown;
+}
+
 int main(int argc, char **argv){
     unsigned long seed = argc>1 ? strtoull(argv[1],NULL,10) : 42UL;
     seed_rng(seed);
     live_init();                            /* grow the mutable body from the seed */
+    int regrown=0, remembered=load_scar(&regrown);   /* wake with the memory of past lives */
     Body b; memset(&b,0,sizeof(b));
     for(int c=0;c<NCH;c++) b.ch[c]=0.2f;   /* faint initial body */
     b.temp=0.9f;
@@ -767,13 +819,15 @@ int main(int argc, char **argv){
     printf("subjectivity — a small alien. seed=%lu  cloud=%d words\n", seed, g_nlive);
     printf("speak to it; it answers from its body, not your meaning.\n");
     printf("  /top = the body's heaviest words (* = ingested scar)   /quit = leave.\n\n");
+    if(remembered)
+        printf("  it remembers %d words from a past life — %d scars regrown.\n\n", remembered, regrown);
 
     char line[1024];
     while(1){
         printf("you> "); fflush(stdout);
         if(!fgets(line,sizeof(line),stdin)) break;
         size_t L=strlen(line); while(L>0 && (line[L-1]=='\n'||line[L-1]=='\r')) line[--L]='\0';
-        if(strcmp(line,"/quit")==0) break;
+        if(strcmp(line,"/quit")==0) break;   /* save happens once, after the loop */
         if(strcmp(line,"/top")==0){
             int idx[8]; float wv[8]; for(int i=0;i<8;i++){ idx[i]=-1; wv[i]=-1e30f; }
             for(int w=0; w<g_nlive; w++){ float x=g_live[w].weight;
@@ -792,6 +846,7 @@ int main(int argc, char **argv){
         settle(&b);      /* metarecursion: hear a draft, blend 15%, keep the heat */
         render(&b);      /* dynamic form by resonance; consolidates (morph) inside */
     }
+    save_scar();   /* also persist on EOF / end of input */
     printf("gone.\n");
     return 0;
 }

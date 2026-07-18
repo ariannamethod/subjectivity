@@ -4,3 +4,6 @@ reffs/
 subjectivity
 *.o
 *.dSYM
+# per-life memory (the scar persists locally, not in source)
+*.mem
+*.mem.tmp
