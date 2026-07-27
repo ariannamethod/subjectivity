@@ -855,28 +855,30 @@ static void compute_D(float D[NCH+1]){
     D[NCH]=g_shame;
 }
 
-/* write my D to my slot, read the other's, let the other's scar bend my body.
- * O_CREAT (never O_TRUNC) + flock'd pread/pwrite so two processes never tear or
- * truncate a slot; a peer with no scar (D≈0) exerts no pull. */
+/* ONE shared sediment field (actually.love: no foreign slot — grief is a deformation
+ * of the one substrate everyone collapses). Read the STANDING field first (others +
+ * my own decayed sediment, before my fresh deposit → not self-dominated), let it bend
+ * this body, then sediment my own grief into it. O_CREAT (never O_TRUNC) + flock. */
+#define SED_DECAY   0.90f
+#define SED_DEPOSIT 0.35f
 static void carrier_bend(Body *b){
     if(!g_carrier_path) return;
     float Dself[NCH+1]; compute_D(Dself);
     int fd=open(g_carrier_path, O_RDWR|O_CREAT, 0644); if(fd<0) return;
     if(flock(fd, LOCK_EX)!=0){ close(fd); return; }
-    float buf[2][NCH+1]; memset(buf,0,sizeof buf);
-    ssize_t r=pread(fd, buf, sizeof buf, 0);
-    if(r < (ssize_t)sizeof buf) memset(buf,0,sizeof buf);   /* fresh/partial/error read → peer absent, don't trust bytes */
-    memcpy(buf[g_carrier_slot], Dself, sizeof Dself);
-    ssize_t w=pwrite(fd, buf, sizeof buf, 0);
+    float F[NCH+1]; memset(F,0,sizeof F);
+    ssize_t r=pread(fd, F, sizeof F, 0);
+    if(r < (ssize_t)sizeof F) memset(F,0,sizeof F);        /* fresh/partial → empty field */
+    float fn=0.0f;
+    for(int c=0;c<NCH;c++){ if(!isfinite(F[c])) F[c]=0.0f; F[c]=clampf(F[c],0.0f,4.0f); fn+=F[c]*F[c]; }
+    if(!isfinite(F[NCH])) F[NCH]=0.0f; F[NCH]=clampf(F[NCH],0.0f,40.0f);
+    if(fn>1e-6f || F[NCH]>1e-6f){                          /* collapse the standing shared field */
+        for(int c=0;c<NCH;c++) b->ch[c]=clampf(b->ch[c]+CARRIER_K*(F[c]-b->ch[c]),0.0f,1.0f);
+        memcpy(g_carrier_other, F, sizeof F); g_carrier_seen=1;
+    } else g_carrier_seen=0;
+    for(int c=0;c<=NCH;c++) F[c]=SED_DECAY*F[c]+SED_DEPOSIT*Dself[c];   /* sediment my grief */
+    ssize_t w=pwrite(fd, F, sizeof F, 0); (void)w;
     flock(fd, LOCK_UN); close(fd);
-    if(w!=(ssize_t)sizeof buf) return;                 /* write failed: don't claim an exchange */
-    float Dother[NCH+1]; memcpy(Dother, buf[1-g_carrier_slot], sizeof Dother);
-    float onorm=0.0f;
-    for(int c=0;c<NCH;c++){ if(!isfinite(Dother[c])) Dother[c]=0.0f; Dother[c]=clampf(Dother[c],0.0f,1.0f); onorm+=Dother[c]*Dother[c]; }
-    if(!isfinite(Dother[NCH])) Dother[NCH]=0.0f; Dother[NCH]=clampf(Dother[NCH],0.0f,20.0f);
-    if(onorm<1e-6f && Dother[NCH]<1e-6f){ g_carrier_seen=0; return; }   /* peer scarless/gone → no pull, clear stale */
-    for(int c=0;c<NCH;c++) b->ch[c]=clampf(b->ch[c]+CARRIER_K*(Dother[c]-b->ch[c]),0.0f,1.0f);
-    memcpy(g_carrier_other, Dother, sizeof Dother); g_carrier_seen=1;
 }
 
 int main(int argc, char **argv){
@@ -914,7 +916,7 @@ int main(int argc, char **argv){
                 printf(" %s%s(%.2f)", g_live[idx[i]].w, g_live[idx[i]].alien?"*":"", wv[i]);
             printf("\n");
             if(g_carrier_seen){ int od=0; for(int c=1;c<NCH;c++) if(g_carrier_other[c]>g_carrier_other[od]) od=c;
-                printf("  carrier[%c] other: dom=%s shame=%.2f\n", g_carrier_slot?'B':'A', CH_NAME[od], g_carrier_other[NCH]); }
+                printf("  carrier[%c] field: dom=%s grief=%.2f\n", g_carrier_slot?'B':'A', CH_NAME[od], g_carrier_other[NCH]); }
             printf("\n");
             continue;
         }
