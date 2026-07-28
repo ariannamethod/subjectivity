@@ -881,7 +881,29 @@ static void carrier_bend(Body *b){
     flock(fd, LOCK_UN); close(fd);
 }
 
+/* M-2 falsifier: A loads its OWN strong love-state, then reads a grief field with
+ * dominant chamber `domc`. Returns A's dominant chamber after — does the other's
+ * grief WIN over A's own load (content read), or does A stay itself (self-dominated)? */
+static int dom_after_field(unsigned long seed, int domc, float mag){
+    seed_rng(seed); live_init(); g_shame=0.0f; g_shame_off=1;   /* isolate the field */
+    Body b; memset(&b,0,sizeof b); for(int c=0;c<NCH;c++) b.ch[c]=0.2f; b.temp=0.9f;
+    inhale(&b, "love fire heart kiss");                          /* A's own strong love-load */
+    float F[NCH+1]; for(int c=0;c<NCH;c++) F[c]=0.3f; F[domc]=mag; F[NCH]=0.5f;
+    for(int c=0;c<NCH;c++) b.ch[c]=clampf(b.ch[c]+CARRIER_K*(F[c]-b.ch[c]),0.0f,1.0f);
+    settle(&b);
+    int d=0; for(int c=1;c<NCH;c++) if(b.ch[c]>b.ch[d]) d=c; return d;
+}
+
 int main(int argc, char **argv){
+    if(argc>1 && strcmp(argv[1],"--carriertest")==0){
+        int N = argc>2 ? atoi(argv[2]) : 30;
+        float mags[4]={0.5f,0.8f,1.2f,2.0f};
+        for(int m=0;m<4;m++){ int track=0;
+            for(int s=1;s<=N;s++){ int dr=s%NCH, df=(s+3)%NCH; if(df==dr) df=(df+1)%NCH;
+                if(dom_after_field((unsigned long)s,dr,mags[m])==dr && dom_after_field((unsigned long)s,df,mags[m])==df) track++; }
+            printf("field-mag %.1f  content-track %d/%d\n", mags[m], track, N); }
+        return 0;
+    }
     unsigned long seed = argc>1 ? strtoull(argv[1],NULL,10) : 42UL;
     seed_rng(seed);
     g_shame_off = getenv("SUBJ_NOSHAME") != NULL;
