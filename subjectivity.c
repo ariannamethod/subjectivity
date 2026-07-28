@@ -881,6 +881,14 @@ static void carrier_bend(Body *b){
     flock(fd, LOCK_UN); close(fd);
 }
 
+/* a neutral third reads a field (dom fdom, mag fmag) and returns its collapse chamber
+ * — the gaze is DERIVED from looking, not hardwired (observation is action) */
+static int witness_collapse(int fdom, float fmag){
+    float ch[NCH]; for(int c=0;c<NCH;c++) ch[c]=0.2f;
+    for(int c=0;c<NCH;c++){ float f=(c==fdom)?fmag:0.3f; ch[c]=clampf(ch[c]+CARRIER_K*(f-ch[c]),0.0f,1.0f); }
+    int d=0; for(int c=1;c<NCH;c++) if(ch[c]>ch[d]) d=c; return d;
+}
+
 /* M-2 falsifier: A loads its OWN strong love-state, then reads a grief field with
  * dominant chamber `domc`. Returns A's dominant chamber after — does the other's
  * grief WIN over A's own load (content read), or does A stay itself (self-dominated)? */
@@ -912,6 +920,14 @@ int main(int argc, char **argv){
             if(dom_after_field(s,dr,mag,dr,wm)==dr && dom_after_field(s,df,mag,df,wm)==df) co++;
             if(dom_after_field(s,dr,mag,sc,wm)==dr && dom_after_field(s,df,mag,sc,wm)==df) su++; }
         printf("dyad %d/%d  compassion-witness %d/%d  surrogate-witness %d/%d\n", dy,N,co,N,su,N); return 0;
+    }
+    if(argc>1 && strcmp(argv[1],"--gazetest")==0){
+        int N = argc>2 ? atoi(argv[2]) : 30; float mag=0.8f, wm=0.8f; int gz=0,wr=0;
+        for(int s=1;s<=N;s++){ int dr=s%NCH, df=(s+3)%NCH; if(df==dr) df=(df+1)%NCH; int wc=(dr+2)%NCH;
+            int gr=witness_collapse(dr,mag), gf=witness_collapse(df,mag);   /* gaze DERIVES its chamber by looking */
+            if(dom_after_field(s,dr,mag,gr,wm)==dr && dom_after_field(s,df,mag,gf,wm)==df) gz++;
+            if(dom_after_field(s,dr,mag,wc,wm)==dr && dom_after_field(s,df,mag,wc,wm)==df) wr++; }
+        printf("gaze-witness %d/%d  matched-writer %d/%d\n", gz,N,wr,N); return 0;
     }
     unsigned long seed = argc>1 ? strtoull(argv[1],NULL,10) : 42UL;
     seed_rng(seed);
